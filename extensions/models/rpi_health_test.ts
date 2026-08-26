@@ -4,8 +4,10 @@
 import { assert, assertEquals, assertThrows } from "jsr:@std/assert@1";
 import { createModelTestContext } from "jsr:@swamp-club/swamp-testing@0.20260824.32";
 import {
+  assertPi5Supported,
   model,
   parseClockOutput,
+  parsePmicReadAdc,
   parseTempOutput,
   parseThrottled,
   parseVoltsOutput,
@@ -180,4 +182,130 @@ Deno.test("readClocks writes a clocks resource with sane invariants", async () =
   assert(data.coreVolts > 0 && data.coreVolts < 5);
   const armEntry = data.clocks.find((c) => c.name === "arm");
   assertEquals(armEntry?.hertz, data.armHertz);
+});
+
+// --- parsePmicReadAdc -----------------------------------------------------
+
+// Captured live from `vcgencmd pmic_read_adc` on this Pi 5, unprivileged.
+const REAL_PMIC_OUTPUT = `
+ 3V7_WL_SW_A current(0)=0.08880963A
+   3V3_SYS_A current(1)=0.06636324A
+   1V8_SYS_A current(2)=0.17371550A
+  DDR_VDD2_A current(3)=0.01463895A
+  DDR_VDDQ_A current(4)=0.00000000A
+   1V1_SYS_A current(5)=0.22641580A
+    0V8_SW_A current(6)=0.26838080A
+  VDD_CORE_A current(7)=0.92871990A
+   3V3_DAC_A current(17)=0.00012210A
+   3V3_ADC_A current(18)=0.00024420A
+   0V8_AON_A current(16)=0.00341880A
+      HDMI_A current(22)=0.02344320A
+ 3V7_WL_SW_V volt(8)=3.65987400V
+   3V3_SYS_V volt(9)=3.30632200V
+   1V8_SYS_V volt(10)=1.79682400V
+  DDR_VDD2_V volt(11)=1.10292900V
+  DDR_VDDQ_V volt(12)=0.60219720V
+   1V1_SYS_V volt(13)=1.10402800V
+    0V8_SW_V volt(14)=0.80109810V
+  VDD_CORE_V volt(15)=0.90901010V
+   3V3_DAC_V volt(20)=3.30311000V
+   3V3_ADC_V volt(21)=3.30127900V
+   0V8_AON_V volt(19)=0.79618980V
+      HDMI_V volt(23)=5.08530000V
+     EXT5V_V volt(24)=5.08798000V
+      BATT_V volt(25)=0.00256410V
+`;
+
+Deno.test("parsePmicReadAdc pairs 3V7_WL_SW correctly despite the embedded 'V' in its name", () => {
+  const result = parsePmicReadAdc(REAL_PMIC_OUTPUT);
+  const rail = result.rails.find((r) => r.name === "3V7_WL_SW");
+  assert(rail, "3V7_WL_SW rail missing");
+  assertEquals(rail.amps, 0.08880963);
+  assertEquals(rail.volts, 3.659874);
+  assertEquals(rail.watts, 0.08880963 * 3.659874);
+});
+
+Deno.test("parsePmicReadAdc hoists EXT5V_V and BATT_V without leaving orphan rail entries", () => {
+  const result = parsePmicReadAdc(REAL_PMIC_OUTPUT);
+  assertEquals(result.supplyVolts, 5.08798);
+  assertEquals(result.batteryVolts, 0.0025641);
+  assert(
+    !result.rails.some((r) => r.name === "EXT5V" || r.name === "BATT"),
+    "EXT5V/BATT leaked into rails as orphan entries",
+  );
+});
+
+Deno.test("parsePmicReadAdc pairs every current/voltage rail with no nulls on real output", () => {
+  const result = parsePmicReadAdc(REAL_PMIC_OUTPUT);
+  // 12 current entries + 12 matched voltage entries = 12 fully-paired rails
+  // (EXT5V/BATT are the 2 remaining voltage-only entries, hoisted above).
+  assertEquals(result.rails.length, 12);
+  for (const rail of result.rails) {
+    assert(rail.volts !== null, `${rail.name} missing volts`);
+    assert(rail.amps !== null, `${rail.name} missing amps`);
+    assert(rail.watts !== null, `${rail.name} missing watts`);
+  }
+});
+
+Deno.test("parsePmicReadAdc estimatedTotalWatts lands in the plausible idle range with real output", () => {
+  const result = parsePmicReadAdc(REAL_PMIC_OUTPUT);
+  assert(
+    result.estimatedTotalWatts > 1.5 && result.estimatedTotalWatts < 4,
+    `estimatedTotalWatts ${result.estimatedTotalWatts} outside plausible idle range`,
+  );
+});
+
+Deno.test("parsePmicReadAdc handles single-line whitespace-separated input, not just one-per-line", () => {
+  const oneLine =
+    "3V3_SYS_A current(1)=0.06050766A 3V3_SYS_V volt(9)=3.32766400V EXT5V_V volt(24)=5.17776000V";
+  const result = parsePmicReadAdc(oneLine);
+  assertEquals(result.rails, [
+    { name: "3V3_SYS", amps: 0.06050766, volts: 3.327664, watts: 0.06050766 * 3.327664 },
+  ]);
+  assertEquals(result.supplyVolts, 5.17776);
+});
+
+Deno.test("parsePmicReadAdc null-fills a rail with only a current entry rather than defaulting to zero", () => {
+  const result = parsePmicReadAdc("SOME_RAIL_A current(0)=0.5A");
+  assertEquals(result.rails, [
+    { name: "SOME_RAIL", amps: 0.5, volts: null, watts: null },
+  ]);
+});
+
+Deno.test("parsePmicReadAdc throws on a label with no _A/_V suffix", () => {
+  assertThrows(
+    () => parsePmicReadAdc("BOGUS_LABEL current(0)=0.5A"),
+    Error,
+    "expected _A/_V suffix",
+  );
+});
+
+Deno.test("assertPi5Supported throws a clean unsupported-model error for a non-Pi5 model string", () => {
+  assertThrows(
+    () => assertPi5Supported({ model: "Raspberry Pi 4 Model B Rev 1.4", isPi5: false }),
+    Error,
+    "unsupported on this model",
+  );
+});
+
+Deno.test("assertPi5Supported does not throw for a Pi 5 model string", () => {
+  assertPi5Supported({ model: "Raspberry Pi 5 Model B Rev 1.1", isPi5: true });
+});
+
+Deno.test("readPmic writes a pmic resource with sane invariants on this real Pi 5", async () => {
+  const { context, getWrittenResources } = createModelTestContext({
+    globalArgs: { vcgencmdPath: "vcgencmd" },
+    methodName: "readPmic",
+  });
+
+  await model.methods.readPmic.execute({}, asContext(context));
+
+  const data = getWrittenResources()[0].data as {
+    rails: Array<{ name: string }>;
+    supplyVolts: number | null;
+    estimatedTotalWatts: number;
+  };
+  assert(data.rails.length > 0);
+  assert(data.supplyVolts !== null && data.supplyVolts > 4.5 && data.supplyVolts < 5.5);
+  assert(data.estimatedTotalWatts > 0);
 });

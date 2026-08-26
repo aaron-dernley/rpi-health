@@ -104,6 +104,20 @@ export async function assertRaspberryPiHardware(
   return { model, isPi5: model.includes("Raspberry Pi 5") };
 }
 
+/**
+ * Guard for Pi-5-only methods (currently just readPmic). Earlier Pi models
+ * have no PMIC ADC and pmic_read_adc fails on them — this throws a clean,
+ * named error instead of letting that failure surface as a raw crash.
+ */
+export function assertPi5Supported(hardware: PiHardwareInfo): void {
+  if (!hardware.isPi5) {
+    throw new Error(
+      `readPmic is unsupported on this model: the PMIC ADC (pmic_read_adc) ` +
+        `requires a Raspberry Pi 5. Detected: "${hardware.model}".`,
+    );
+  }
+}
+
 const GlobalArgsSchema = z.object({
   tempSoftLimitCelsius: z.number().default(80).describe(
     "Pi 5 soft throttle point in Celsius. Not consumed by any method " +
@@ -281,6 +295,146 @@ export function parseVoltsOutput(output: string): number {
   return volts;
 }
 
+const PmicRailSchema = z.object({
+  name: z.string().describe(
+    "Rail base name with the _A/_V current/voltage suffix stripped, e.g. " +
+      "\"VDD_CORE\", \"3V3_SYS\", \"3V7_WL_SW\".",
+  ),
+  volts: z.number().nullable().describe(
+    "Rail voltage, or null when pmic_read_adc reported no voltage entry " +
+      "for this rail. Null means unknown; it never means the rail is off.",
+  ),
+  amps: z.number().nullable().describe(
+    "Rail current, or null when pmic_read_adc reported no current entry " +
+      "for this rail. Null means unknown; it never means zero draw.",
+  ),
+  watts: z.number().nullable().describe(
+    "volts * amps, or null when either is missing.",
+  ),
+});
+
+const PmicSchema = z.object({
+  rails: z.array(PmicRailSchema).describe(
+    "One entry per paired current/voltage rail from vcgencmd pmic_read_adc. " +
+      "EXT5V and BATT are excluded here — see supplyVolts/batteryVolts.",
+  ),
+  supplyVolts: z.number().nullable().describe(
+    "EXT5V_V — what the PSU is actually delivering. Null if unreadable.",
+  ),
+  batteryVolts: z.number().nullable().describe(
+    "BATT_V — the RTC coin-cell voltage. Null if unreadable.",
+  ),
+  estimatedTotalWatts: z.number().describe(
+    "Sum of all rail watts. CAVEAT: the PMIC cannot measure current on the " +
+      "main 5V input rail, so this systematically understates real " +
+      "consumption — an idle Pi 5 drawing ~3W externally measured reports " +
+      "around ~2.2W here. Useful as a relative trend across samples; a bad " +
+      "absolute wattmeter.",
+  ),
+  capturedAt: z.string().describe("ISO-8601 timestamp when this snapshot was captured."),
+});
+
+/** One rail's parsed current/voltage/wattage. */
+export interface PmicRail {
+  /** Rail base name, current/voltage suffix stripped. */
+  name: string;
+  /** Rail voltage, or null when unreported. */
+  volts: number | null;
+  /** Rail current, or null when unreported. */
+  amps: number | null;
+  /** volts * amps, or null when either is missing. */
+  watts: number | null;
+}
+
+/** Parsed `vcgencmd pmic_read_adc` output. */
+export interface PmicReading {
+  /** Paired rails, EXT5V/BATT excluded (see supplyVolts/batteryVolts). */
+  rails: PmicRail[];
+  /** EXT5V_V, or null if unreported. */
+  supplyVolts: number | null;
+  /** BATT_V, or null if unreported. */
+  batteryVolts: number | null;
+  /** Sum of rail watts — see the schema description's underestimation caveat. */
+  estimatedTotalWatts: number;
+}
+
+/**
+ * Parse `vcgencmd pmic_read_adc` output into paired rails. Entries may be
+ * newline- or space-separated depending on shell context, so this splits on
+ * whitespace and pairs (label, value) tokens rather than assuming one entry
+ * per line. Each label ends in exactly "_A" (current) or "_V" (voltage) —
+ * only that confirmed 2-character suffix is stripped, since rail names
+ * themselves contain "V" (e.g. "3V7_WL_SW_A" -> base "3V7_WL_SW"). EXT5V and
+ * BATT have voltage but no matching current entry; they're hoisted to their
+ * own fields rather than left as orphan half-populated rail entries.
+ */
+export function parsePmicReadAdc(text: string): PmicReading {
+  const tokens = text.trim().split(/\s+/).filter((t) => t.length > 0);
+  if (tokens.length === 0 || tokens.length % 2 !== 0) {
+    throw new Error(
+      `Unexpected vcgencmd pmic_read_adc output: odd or empty token count (${tokens.length})`,
+    );
+  }
+
+  const valueRe = /^(current|volt)\(\d+\)=(-?[\d.]+)([AV])$/;
+  const bases = new Map<string, { volts: number | null; amps: number | null }>();
+
+  for (let i = 0; i < tokens.length; i += 2) {
+    const label = tokens[i];
+    const valueToken = tokens[i + 1];
+    const suffix = label.slice(-2);
+    if (suffix !== "_A" && suffix !== "_V") {
+      throw new Error(
+        `Unexpected pmic_read_adc label (expected _A/_V suffix): "${label}"`,
+      );
+    }
+    const base = label.slice(0, -2);
+    const match = valueRe.exec(valueToken);
+    if (!match) {
+      throw new Error(
+        `Unexpected pmic_read_adc value for ${label}: "${valueToken}"`,
+      );
+    }
+    const value = Number(match[2]);
+    if (!Number.isFinite(value)) {
+      throw new Error(`Could not parse numeric value for ${label}: "${match[2]}"`);
+    }
+    const entry = bases.get(base) ?? { volts: null, amps: null };
+    if (suffix === "_A") {
+      entry.amps = value;
+    } else {
+      entry.volts = value;
+    }
+    bases.set(base, entry);
+  }
+
+  let supplyVolts: number | null = null;
+  let batteryVolts: number | null = null;
+  const rails: PmicRail[] = [];
+  let estimatedTotalWatts = 0;
+
+  for (const [base, { volts, amps }] of bases) {
+    if (base === "EXT5V") {
+      supplyVolts = volts;
+      continue;
+    }
+    if (base === "BATT") {
+      batteryVolts = volts;
+      continue;
+    }
+    const watts = volts !== null && amps !== null ? volts * amps : null;
+    if (watts !== null) estimatedTotalWatts += watts;
+    rails.push({ name: base, volts, amps, watts });
+  }
+
+  return {
+    rails,
+    supplyVolts,
+    batteryVolts,
+    estimatedTotalWatts: Math.round(estimatedTotalWatts * 1000) / 1000,
+  };
+}
+
 /** Model definition for `@aaronge/rpi-health` — Pi 5 firmware and power telemetry. */
 export const model = {
   type: "@aaronge/rpi-health",
@@ -301,6 +455,14 @@ export const model = {
         "Clock frequencies (arm, core, v3d, isp, hevc), core temperature, " +
         "and core voltage, all from vcgencmd.",
       schema: ClocksSchema,
+      lifetime: "infinite" as const,
+      garbageCollection: 200,
+    },
+    pmic: {
+      description:
+        "Pi 5 PMIC rail currents/voltages from vcgencmd pmic_read_adc. " +
+        "Unsupported on earlier Pi models, which have no PMIC ADC.",
+      schema: PmicSchema,
       lifetime: "infinite" as const,
       garbageCollection: 200,
     },
@@ -433,6 +595,61 @@ export const model = {
           armHertz: armClock.hertz,
           coreTempCelsius,
           coreVolts,
+          capturedAt,
+        });
+        return { dataHandles: [handle] };
+      },
+    },
+    readPmic: {
+      description:
+        "Run vcgencmd pmic_read_adc, pair rails, and write the pmic " +
+        "resource. Pi 5 only — throws a clean error on earlier models.",
+      arguments: z.object({}),
+      execute: async (
+        _args: Record<string, never>,
+        context: {
+          globalArgs: GlobalArgs;
+          logger: MinimalLogger;
+          writeResource: (
+            specName: string,
+            name: string,
+            data: Record<string, unknown>,
+          ) => Promise<{ name: string }>;
+        },
+      ) => {
+        const hardware = await assertRaspberryPiHardware(
+          context.globalArgs.vcgencmdPath,
+        );
+        assertPi5Supported(hardware);
+        const capturedAt = new Date().toISOString();
+
+        context.logger.info("Reading PMIC rails via vcgencmd pmic_read_adc");
+        const cmd = new Deno.Command(context.globalArgs.vcgencmdPath, {
+          args: ["pmic_read_adc"],
+          stdout: "piped",
+          stderr: "piped",
+        });
+        const output = await cmd.output();
+        if (!output.success) {
+          throw new Error(
+            `vcgencmd pmic_read_adc failed: ${
+              new TextDecoder().decode(output.stderr).trim()
+            }`,
+          );
+        }
+        const { rails, supplyVolts, batteryVolts, estimatedTotalWatts } =
+          parsePmicReadAdc(new TextDecoder().decode(output.stdout));
+
+        context.logger.info(
+          "Captured {count} PMIC rails: supplyVolts={supplyVolts} estimatedTotalWatts={estimatedTotalWatts}",
+          { count: rails.length, supplyVolts, estimatedTotalWatts },
+        );
+
+        const handle = await context.writeResource("pmic", "pmic", {
+          rails,
+          supplyVolts,
+          batteryVolts,
+          estimatedTotalWatts,
           capturedAt,
         });
         return { dataHandles: [handle] };
