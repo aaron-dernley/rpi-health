@@ -878,7 +878,11 @@ export const model = {
 
         context.logger.info(
           "Captured firmware state: model={model} isPi5={isPi5} eepromUpToDate={eepromUpToDate}",
-          { model: hardware.model, isPi5: hardware.isPi5, eepromUpToDate: eeprom.upToDate },
+          {
+            model: hardware.model,
+            isPi5: hardware.isPi5,
+            eepromUpToDate: eeprom.upToDate,
+          },
         );
 
         const handle = await context.writeResource("firmware", "firmware", {
