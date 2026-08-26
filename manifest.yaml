@@ -8,5 +8,8 @@ repository: https://github.com/aaron-dernley/rpi-health
 models:
   - rpi_health.ts
 
+additionalFiles:
+  - README.md
+
 platforms:
   - linux-aarch64
