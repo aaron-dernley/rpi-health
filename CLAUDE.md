@@ -42,3 +42,13 @@ schema of the CLI (commands, options, arguments) intended for agent
 consumption, run `swamp help [<command>...]` — e.g. `swamp help` returns
 the full tree, and `swamp help model method run` scopes to a subtree.
 <!-- END swamp managed section -->
+
+## Repo Conventions
+
+1. **README at repo root.** Any extension built in this repo must have its
+   `README.md` at the repo root (not inside `extensions/models/`), and it
+   must be listed under `additionalFiles` in `manifest.yaml` so it ships
+   with the published package. Mirror the structure of the sibling
+   `@aaronge/host-health` repo's README: title/description, Installation,
+   Usage, a global-arguments table, a "How it works" section per resource,
+   and a Workflow section describing the schedule.
