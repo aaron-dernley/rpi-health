@@ -176,9 +176,11 @@ const ThrottleFlagsSinceBootSchema = z.object({
 
 const ThrottleSchema = z.object({
   raw: z.string().describe(
-    "Verbatim hex string from vcgencmd get_throttled, e.g. \"0x50000\".",
+    'Verbatim hex string from vcgencmd get_throttled, e.g. "0x50000".',
   ),
-  rawValue: z.number().describe("raw parsed as an integer via parseInt(hex, 16)."),
+  rawValue: z.number().describe(
+    "raw parsed as an integer via parseInt(hex, 16).",
+  ),
   now: ThrottleFlagsNowSchema.describe(
     "Instantaneous flags (bits 0-3): the state at the moment of sampling. " +
       "Usually clean even on a machine that browned out an hour ago.",
@@ -191,7 +193,9 @@ const ThrottleSchema = z.object({
     "True only when rawValue == 0 — every bit clear, current and " +
       "historical. Any fault, past or present, makes this false.",
   ),
-  capturedAt: z.string().describe("ISO-8601 timestamp when this snapshot was captured."),
+  capturedAt: z.string().describe(
+    "ISO-8601 timestamp when this snapshot was captured.",
+  ),
 });
 
 /** Parse `vcgencmd get_throttled` output (e.g. "throttled=0x50000") into typed flags. */
@@ -235,7 +239,9 @@ export function parseThrottled(vcgencmdOutput: string): {
 
 const ClockReadingSchema = z.object({
   name: z.string().describe("Clock domain name: arm, core, v3d, isp, or hevc."),
-  hertz: z.number().describe("Clock frequency in Hz, from vcgencmd measure_clock."),
+  hertz: z.number().describe(
+    "Clock frequency in Hz, from vcgencmd measure_clock.",
+  ),
 });
 
 const ClocksSchema = z.object({
@@ -250,8 +256,12 @@ const ClocksSchema = z.object({
       "@aaronge/host-health's sysfs thermal reading via a different path — " +
       "intentional, for occasional cross-checking, not redundant to remove.",
   ),
-  coreVolts: z.number().describe("Core voltage in volts, from vcgencmd measure_volts core."),
-  capturedAt: z.string().describe("ISO-8601 timestamp when this snapshot was captured."),
+  coreVolts: z.number().describe(
+    "Core voltage in volts, from vcgencmd measure_volts core.",
+  ),
+  capturedAt: z.string().describe(
+    "ISO-8601 timestamp when this snapshot was captured.",
+  ),
 });
 
 const CLOCK_DOMAINS = ["arm", "core", "v3d", "isp", "hevc"] as const;
@@ -260,11 +270,15 @@ const CLOCK_DOMAINS = ["arm", "core", "v3d", "isp", "hevc"] as const;
 export function parseClockOutput(output: string): number {
   const parts = output.trim().split("=");
   if (parts.length < 2) {
-    throw new Error(`Unexpected vcgencmd measure_clock output: "${output.trim()}"`);
+    throw new Error(
+      `Unexpected vcgencmd measure_clock output: "${output.trim()}"`,
+    );
   }
   const hertz = Number(parts[1].trim());
   if (!Number.isFinite(hertz)) {
-    throw new Error(`Could not parse frequency from measure_clock: "${parts[1]}"`);
+    throw new Error(
+      `Could not parse frequency from measure_clock: "${parts[1]}"`,
+    );
   }
   return hertz;
 }
@@ -273,11 +287,15 @@ export function parseClockOutput(output: string): number {
 export function parseTempOutput(output: string): number {
   const match = /^temp=(-?[\d.]+)'C\s*$/.exec(output.trim());
   if (!match) {
-    throw new Error(`Unexpected vcgencmd measure_temp output: "${output.trim()}"`);
+    throw new Error(
+      `Unexpected vcgencmd measure_temp output: "${output.trim()}"`,
+    );
   }
   const celsius = Number(match[1]);
   if (!Number.isFinite(celsius)) {
-    throw new Error(`Could not parse Celsius value from measure_temp: "${match[1]}"`);
+    throw new Error(
+      `Could not parse Celsius value from measure_temp: "${match[1]}"`,
+    );
   }
   return celsius;
 }
@@ -286,11 +304,15 @@ export function parseTempOutput(output: string): number {
 export function parseVoltsOutput(output: string): number {
   const match = /^volt=(-?[\d.]+)V\s*$/.exec(output.trim());
   if (!match) {
-    throw new Error(`Unexpected vcgencmd measure_volts output: "${output.trim()}"`);
+    throw new Error(
+      `Unexpected vcgencmd measure_volts output: "${output.trim()}"`,
+    );
   }
   const volts = Number(match[1]);
   if (!Number.isFinite(volts)) {
-    throw new Error(`Could not parse volts value from measure_volts: "${match[1]}"`);
+    throw new Error(
+      `Could not parse volts value from measure_volts: "${match[1]}"`,
+    );
   }
   return volts;
 }
@@ -298,7 +320,7 @@ export function parseVoltsOutput(output: string): number {
 const PmicRailSchema = z.object({
   name: z.string().describe(
     "Rail base name with the _A/_V current/voltage suffix stripped, e.g. " +
-      "\"VDD_CORE\", \"3V3_SYS\", \"3V7_WL_SW\".",
+      '"VDD_CORE", "3V3_SYS", "3V7_WL_SW".',
   ),
   volts: z.number().nullable().describe(
     "Rail voltage, or null when pmic_read_adc reported no voltage entry " +
@@ -331,7 +353,9 @@ const PmicSchema = z.object({
       "around ~2.2W here. Useful as a relative trend across samples; a bad " +
       "absolute wattmeter.",
   ),
-  capturedAt: z.string().describe("ISO-8601 timestamp when this snapshot was captured."),
+  capturedAt: z.string().describe(
+    "ISO-8601 timestamp when this snapshot was captured.",
+  ),
 });
 
 /** One rail's parsed current/voltage/wattage. */
@@ -377,7 +401,10 @@ export function parsePmicReadAdc(text: string): PmicReading {
   }
 
   const valueRe = /^(current|volt)\(\d+\)=(-?[\d.]+)([AV])$/;
-  const bases = new Map<string, { volts: number | null; amps: number | null }>();
+  const bases = new Map<
+    string,
+    { volts: number | null; amps: number | null }
+  >();
 
   for (let i = 0; i < tokens.length; i += 2) {
     const label = tokens[i];
@@ -397,7 +424,9 @@ export function parsePmicReadAdc(text: string): PmicReading {
     }
     const value = Number(match[2]);
     if (!Number.isFinite(value)) {
-      throw new Error(`Could not parse numeric value for ${label}: "${match[2]}"`);
+      throw new Error(
+        `Could not parse numeric value for ${label}: "${match[2]}"`,
+      );
     }
     const entry = bases.get(base) ?? { volts: null, amps: null };
     if (suffix === "_A") {
@@ -438,9 +467,11 @@ export function parsePmicReadAdc(text: string): PmicReading {
 const FirmwareSchema = z.object({
   model: z.string().describe(
     "/proc/device-tree/model, NUL byte stripped, e.g. " +
-      "\"Raspberry Pi 5 Model B Rev 1.1\".",
+      '"Raspberry Pi 5 Model B Rev 1.1".',
   ),
-  isPi5: z.boolean().describe("True when model names a Raspberry Pi 5 specifically."),
+  isPi5: z.boolean().describe(
+    "True when model names a Raspberry Pi 5 specifically.",
+  ),
   eepromCurrent: z.string().nullable().describe(
     "Installed EEPROM/bootloader build date, from rpi-eeprom-update's " +
       "CURRENT line. Null when rpi-eeprom-update could not be read " +
@@ -464,7 +495,9 @@ const FirmwareSchema = z.object({
     "Raw, multiline vcgencmd version output. Intentionally not parsed — " +
       "its format has changed across firmware revisions and will again.",
   ),
-  capturedAt: z.string().describe("ISO-8601 timestamp when this snapshot was captured."),
+  capturedAt: z.string().describe(
+    "ISO-8601 timestamp when this snapshot was captured.",
+  ),
 });
 
 /** Parsed `rpi-eeprom-update` output; every field is null when the command's output couldn't be read at all. */
@@ -504,7 +537,12 @@ export function parseEepromUpdate(
         "EEPROM fields will be null: {stderr}",
       { stderr: stderr.trim() },
     );
-    return { current: null, latest: null, upToDate: null, bootloaderVersion: null };
+    return {
+      current: null,
+      latest: null,
+      upToDate: null,
+      bootloaderVersion: null,
+    };
   }
 
   const current = currentMatch[1].trim();
@@ -581,7 +619,9 @@ export const model = {
         await assertRaspberryPiHardware(context.globalArgs.vcgencmdPath);
         const capturedAt = new Date().toISOString();
 
-        context.logger.info("Reading throttle state via vcgencmd get_throttled");
+        context.logger.info(
+          "Reading throttle state via vcgencmd get_throttled",
+        );
         const cmd = new Deno.Command(context.globalArgs.vcgencmdPath, {
           args: ["get_throttled"],
           stdout: "piped",
@@ -602,13 +642,20 @@ export const model = {
         if (sinceBoot.underVoltage || sinceBoot.throttled) {
           context.logger.warn(
             "Sticky fault latched since boot: underVoltage={underVoltage} throttled={throttled} (raw={raw})",
-            { underVoltage: sinceBoot.underVoltage, throttled: sinceBoot.throttled, raw },
+            {
+              underVoltage: sinceBoot.underVoltage,
+              throttled: sinceBoot.throttled,
+              raw,
+            },
           );
         }
-        context.logger.info("Captured throttle state: raw={raw} healthy={healthy}", {
-          raw,
-          healthy,
-        });
+        context.logger.info(
+          "Captured throttle state: raw={raw} healthy={healthy}",
+          {
+            raw,
+            healthy,
+          },
+        );
 
         const handle = await context.writeResource("throttle", "throttle", {
           raw,
@@ -673,7 +720,9 @@ export const model = {
           throw new Error("arm clock domain missing from measured clocks");
         }
 
-        const coreTempCelsius = parseTempOutput(await runVcgencmd("measure_temp"));
+        const coreTempCelsius = parseTempOutput(
+          await runVcgencmd("measure_temp"),
+        );
         const coreVolts = parseVoltsOutput(
           await runVcgencmd("measure_volts", "core"),
         );
@@ -788,7 +837,9 @@ export const model = {
         const firmwareVersion = new TextDecoder().decode(versionOutput.stdout)
           .trim();
 
-        context.logger.info("Reading EEPROM/bootloader status via rpi-eeprom-update");
+        context.logger.info(
+          "Reading EEPROM/bootloader status via rpi-eeprom-update",
+        );
         let eeprom: EepromInfo;
         try {
           const eepromCmd = new Deno.Command("rpi-eeprom-update", {

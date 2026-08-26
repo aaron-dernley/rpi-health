@@ -1,0 +1,12 @@
+manifestVersion: 1
+name: "@aaronge/rpi-health"
+version: "2026.08.26.1"
+description: "Raspberry Pi 5 firmware and power telemetry (throttle/under-voltage sticky faults, PMIC rail currents/voltages, clocks, EEPROM/bootloader status) via vcgencmd, as a typed, versioned Swamp model with workflow assertions and CEL joins."
+
+repository: https://github.com/aaron-dernley/rpi-health
+
+models:
+  - rpi_health.ts
+
+platforms:
+  - linux-aarch64
