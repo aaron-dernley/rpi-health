@@ -1,0 +1,117 @@
+id: f7bd50dd-160f-453a-8bc9-1b5b5c403632
+name: rpi-health
+description: >-
+  Collect throttle, clock, and PMIC telemetry from rpi-local, assert each
+  against a threshold, and print a one-screen summary. Fails when any
+  threshold is breached, including when a sticky under-voltage or
+  throttle fault has ever latched since boot.
+version: 1
+tags: {}
+trigger:
+  schedule: "*/5 * * * *"
+inputs:
+  properties:
+    tempSoftLimitCelsius:
+      type: number
+      default: 80
+      description: coreTempCelsius that trips the thermal assert.
+    minSupplyVolts:
+      type: number
+      default: 4.8
+      description: supplyVolts floor that trips the power assert.
+jobs:
+  - name: collect
+    description: Read throttle, clock, and PMIC state in parallel. readFirmware is
+      intentionally excluded — it belongs in a separate, much less frequent
+      workflow.
+    dependsOn: []
+    steps:
+      - name: readThrottle
+        task:
+          type: model_method
+          modelIdOrName: rpi-local
+          methodName: readThrottle
+        dependsOn: []
+      - name: readClocks
+        task:
+          type: model_method
+          modelIdOrName: rpi-local
+          methodName: readClocks
+        dependsOn: []
+      - name: readPmic
+        task:
+          type: model_method
+          modelIdOrName: rpi-local
+          methodName: readPmic
+        dependsOn: []
+
+  - name: assert
+    description: Fail the run when any threshold is breached.
+    dependsOn:
+      - job: collect
+        condition:
+          type: completed
+    steps:
+      - name: throttle-healthy
+        allowFailure: false
+        task:
+          type: assert
+          expr: >-
+            data.latest("rpi-local", "throttle").attributes.healthy == true
+          message: >-
+            throttle unhealthy: raw ${{ data.latest("rpi-local", "throttle").attributes.raw }}
+            (sinceBoot.underVoltage=${{ data.latest("rpi-local", "throttle").attributes.sinceBoot.underVoltage }}
+            sinceBoot.throttled=${{ data.latest("rpi-local", "throttle").attributes.sinceBoot.throttled }}) —
+            sticky bits latch until reboot, so this stays red after a single
+            past brownout even if now.* is clean. That's correct, not a bug.
+          severity: high
+        dependsOn: []
+      - name: temp-ok
+        allowFailure: false
+        task:
+          type: assert
+          expr: >-
+            data.latest("rpi-local", "clocks").attributes.coreTempCelsius
+            < inputs.tempSoftLimitCelsius
+          message: >-
+            coreTempCelsius ${{ data.latest("rpi-local", "clocks").attributes.coreTempCelsius }}C
+            >= tempSoftLimitCelsius ${{ inputs.tempSoftLimitCelsius }}C
+          severity: high
+        dependsOn: []
+      - name: supply-volts-ok
+        allowFailure: false
+        task:
+          type: assert
+          expr: >-
+            data.latest("rpi-local", "pmic").attributes.supplyVolts
+            > inputs.minSupplyVolts
+          message: >-
+            supplyVolts ${{ data.latest("rpi-local", "pmic").attributes.supplyVolts }}V
+            <= minSupplyVolts ${{ inputs.minSupplyVolts }}V
+          severity: high
+        dependsOn: []
+
+  - name: report
+    description: >-
+      Print a one-screen summary. Depends on collect only (not assert), so
+      it still runs when an assertion fails.
+    dependsOn:
+      - job: collect
+        condition:
+          type: completed
+    steps:
+      - name: summarize
+        task:
+          type: model_method
+          modelType: "command/shell"
+          modelName: rpi-health-summary
+          methodName: execute
+          inputs:
+            run: >-
+              echo "rpi-health: rpi-local" &&
+              echo "  core temp: ${{ data.latest('rpi-local', 'clocks').attributes.coreTempCelsius }}C" &&
+              echo "  arm clock: ${{ data.latest('rpi-local', 'clocks').attributes.armHertz }} Hz" &&
+              echo "  supply volts: ${{ data.latest('rpi-local', 'pmic').attributes.supplyVolts }}V (est. total ${{ data.latest('rpi-local', 'pmic').attributes.estimatedTotalWatts }}W)" &&
+              echo "  throttle raw: ${{ data.latest('rpi-local', 'throttle').attributes.raw }} (healthy=${{ data.latest('rpi-local', 'throttle').attributes.healthy }})" &&
+              echo "  sinceBoot: underVoltage=${{ data.latest('rpi-local', 'throttle').attributes.sinceBoot.underVoltage }} armFrequencyCapped=${{ data.latest('rpi-local', 'throttle').attributes.sinceBoot.armFrequencyCapped }} throttled=${{ data.latest('rpi-local', 'throttle').attributes.sinceBoot.throttled }} softTempLimitReached=${{ data.latest('rpi-local', 'throttle').attributes.sinceBoot.softTempLimitReached }}"
+        dependsOn: []
