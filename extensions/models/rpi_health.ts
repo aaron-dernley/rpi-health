@@ -435,6 +435,91 @@ export function parsePmicReadAdc(text: string): PmicReading {
   };
 }
 
+const FirmwareSchema = z.object({
+  model: z.string().describe(
+    "/proc/device-tree/model, NUL byte stripped, e.g. " +
+      "\"Raspberry Pi 5 Model B Rev 1.1\".",
+  ),
+  isPi5: z.boolean().describe("True when model names a Raspberry Pi 5 specifically."),
+  eepromCurrent: z.string().nullable().describe(
+    "Installed EEPROM/bootloader build date, from rpi-eeprom-update's " +
+      "CURRENT line. Null when rpi-eeprom-update could not be read " +
+      "(commonly a permissions issue) — a partial firmware resource with " +
+      "just model/firmwareVersion still gets written in that case.",
+  ),
+  eepromLatest: z.string().nullable().describe(
+    "Latest available EEPROM/bootloader build date, from rpi-eeprom-update's " +
+      "LATEST line. Null when unavailable.",
+  ),
+  eepromUpToDate: z.boolean().nullable().describe(
+    "Whether the installed EEPROM matches the latest available, from " +
+      "rpi-eeprom-update's own BOOTLOADER: status line. Null when that " +
+      "status line could not be read or parsed.",
+  ),
+  bootloaderVersion: z.string().nullable().describe(
+    "Bootloader release channel, from rpi-eeprom-update's RELEASE line. " +
+      "Null when unavailable.",
+  ),
+  firmwareVersion: z.string().describe(
+    "Raw, multiline vcgencmd version output. Intentionally not parsed — " +
+      "its format has changed across firmware revisions and will again.",
+  ),
+  capturedAt: z.string().describe("ISO-8601 timestamp when this snapshot was captured."),
+});
+
+/** Parsed `rpi-eeprom-update` output; every field is null when the command's output couldn't be read at all. */
+export interface EepromInfo {
+  /** Installed EEPROM/bootloader build date, or null. */
+  current: string | null;
+  /** Latest available EEPROM/bootloader build date, or null. */
+  latest: string | null;
+  /** Whether installed matches latest, per the command's own status line, or null. */
+  upToDate: boolean | null;
+  /** Bootloader release channel, or null. */
+  bootloaderVersion: string | null;
+}
+
+/**
+ * Parse `rpi-eeprom-update` output. On this class of hardware the command
+ * can exit non-zero on plain success (e.g. exit 1 simply means "an update
+ * is available", not "permission denied") — so this parses stdout content
+ * directly rather than trusting the exit code. Only the *absence* of a
+ * CURRENT: line (the unambiguous permission-denied/not-installed case)
+ * degrades to all-null fields; a present CURRENT: line is trusted even
+ * alongside a non-zero exit.
+ */
+export function parseEepromUpdate(
+  stdout: string,
+  stderr: string,
+  logger?: MinimalLogger,
+): EepromInfo {
+  const currentMatch = /^\s*CURRENT:\s*(.+)$/m.exec(stdout);
+  const latestMatch = /^\s*LATEST:\s*(.+)$/m.exec(stdout);
+  const releaseMatch = /^\s*RELEASE:\s*(.+)$/m.exec(stdout);
+  const bootloaderMatch = /^\s*BOOTLOADER:\s*(.+)$/m.exec(stdout);
+
+  if (!currentMatch) {
+    logger?.warn(
+      "rpi-eeprom-update produced no CURRENT: line (likely needs root); " +
+        "EEPROM fields will be null: {stderr}",
+      { stderr: stderr.trim() },
+    );
+    return { current: null, latest: null, upToDate: null, bootloaderVersion: null };
+  }
+
+  const current = currentMatch[1].trim();
+  const latest = latestMatch ? latestMatch[1].trim() : null;
+  const bootloaderVersion = releaseMatch ? releaseMatch[1].trim() : null;
+  let upToDate: boolean | null = null;
+  if (bootloaderMatch) {
+    const status = bootloaderMatch[1].trim().toLowerCase();
+    if (status.includes("up to date")) upToDate = true;
+    else if (status.includes("update available")) upToDate = false;
+  }
+
+  return { current, latest, upToDate, bootloaderVersion };
+}
+
 /** Model definition for `@aaronge/rpi-health` — Pi 5 firmware and power telemetry. */
 export const model = {
   type: "@aaronge/rpi-health",
@@ -465,6 +550,14 @@ export const model = {
       schema: PmicSchema,
       lifetime: "infinite" as const,
       garbageCollection: 200,
+    },
+    firmware: {
+      description:
+        "Model identification, EEPROM/bootloader status, and raw vcgencmd " +
+        "version output. Changes almost never — GC'd less aggressively.",
+      schema: FirmwareSchema,
+      lifetime: "infinite" as const,
+      garbageCollection: 20,
     },
   },
   methods: {
@@ -650,6 +743,96 @@ export const model = {
           supplyVolts,
           batteryVolts,
           estimatedTotalWatts,
+          capturedAt,
+        });
+        return { dataHandles: [handle] };
+      },
+    },
+    readFirmware: {
+      description:
+        "Read model id, raw vcgencmd version, and EEPROM/bootloader status " +
+        "via rpi-eeprom-update, degrading to null EEPROM fields (but still " +
+        "writing model + firmwareVersion) when that command can't be read.",
+      arguments: z.object({}),
+      execute: async (
+        _args: Record<string, never>,
+        context: {
+          globalArgs: GlobalArgs;
+          logger: MinimalLogger;
+          writeResource: (
+            specName: string,
+            name: string,
+            data: Record<string, unknown>,
+          ) => Promise<{ name: string }>;
+        },
+      ) => {
+        const hardware = await assertRaspberryPiHardware(
+          context.globalArgs.vcgencmdPath,
+        );
+        const capturedAt = new Date().toISOString();
+
+        context.logger.info("Reading firmware version via vcgencmd version");
+        const versionCmd = new Deno.Command(context.globalArgs.vcgencmdPath, {
+          args: ["version"],
+          stdout: "piped",
+          stderr: "piped",
+        });
+        const versionOutput = await versionCmd.output();
+        if (!versionOutput.success) {
+          throw new Error(
+            `vcgencmd version failed: ${
+              new TextDecoder().decode(versionOutput.stderr).trim()
+            }`,
+          );
+        }
+        const firmwareVersion = new TextDecoder().decode(versionOutput.stdout)
+          .trim();
+
+        context.logger.info("Reading EEPROM/bootloader status via rpi-eeprom-update");
+        let eeprom: EepromInfo;
+        try {
+          const eepromCmd = new Deno.Command("rpi-eeprom-update", {
+            args: [],
+            stdout: "piped",
+            stderr: "piped",
+          });
+          const eepromOutput = await eepromCmd.output();
+          eeprom = parseEepromUpdate(
+            new TextDecoder().decode(eepromOutput.stdout),
+            new TextDecoder().decode(eepromOutput.stderr),
+            context.logger,
+          );
+        } catch (error) {
+          if (error instanceof Deno.errors.NotFound) {
+            context.logger.warn(
+              "rpi-eeprom-update not found on PATH; EEPROM fields will be null",
+            );
+            eeprom = {
+              current: null,
+              latest: null,
+              upToDate: null,
+              bootloaderVersion: null,
+            };
+          } else {
+            throw error;
+          }
+        }
+
+        if (eeprom.current === null) {
+          context.logger.warn(
+            "EEPROM data unavailable this run; writing firmware resource " +
+              "with model and firmwareVersion only — a partial result beats no result",
+          );
+        }
+
+        const handle = await context.writeResource("firmware", "firmware", {
+          model: hardware.model,
+          isPi5: hardware.isPi5,
+          eepromCurrent: eeprom.current,
+          eepromLatest: eeprom.latest,
+          eepromUpToDate: eeprom.upToDate,
+          bootloaderVersion: eeprom.bootloaderVersion,
+          firmwareVersion,
           capturedAt,
         });
         return { dataHandles: [handle] };

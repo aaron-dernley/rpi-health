@@ -5,8 +5,10 @@ import { assert, assertEquals, assertThrows } from "jsr:@std/assert@1";
 import { createModelTestContext } from "jsr:@swamp-club/swamp-testing@0.20260824.32";
 import {
   assertPi5Supported,
+  assertRaspberryPiHardware,
   model,
   parseClockOutput,
+  parseEepromUpdate,
   parsePmicReadAdc,
   parseTempOutput,
   parseThrottled,
@@ -308,4 +310,84 @@ Deno.test("readPmic writes a pmic resource with sane invariants on this real Pi 
   assert(data.rails.length > 0);
   assert(data.supplyVolts !== null && data.supplyVolts > 4.5 && data.supplyVolts < 5.5);
   assert(data.estimatedTotalWatts > 0);
+});
+
+// --- parseEepromUpdate -----------------------------------------------------
+
+// Captured live from `rpi-eeprom-update` on this Pi 5, unprivileged. Note
+// the real command exits 1 here (an update is available) — not a
+// permission failure — which is exactly the case parseEepromUpdate must
+// not misinterpret as "unavailable".
+const REAL_EEPROM_UPDATE_AVAILABLE_OUTPUT = `
+*** UPDATE AVAILABLE ***
+
+Run "sudo rpi-eeprom-update -a" to install this update without a prompt.
+
+To configure the bootloader update policy run "sudo raspi-config"
+
+BOOTLOADER: update available
+   CURRENT: Mon 11 May 11:20:02 UTC 2026 (1778498402)
+    LATEST: Tue 26 May 15:01:25 UTC 2026 (1779807685)
+   RELEASE: default (/usr/lib/firmware/raspberrypi/bootloader-2712/default)
+            Use raspi-config to change the release.
+`;
+
+Deno.test("parseEepromUpdate parses CURRENT/LATEST/RELEASE/BOOTLOADER even when the command 'failed' (exit 1 = update available, not a permission error)", () => {
+  const result = parseEepromUpdate(REAL_EEPROM_UPDATE_AVAILABLE_OUTPUT, "");
+  assertEquals(result.current, "Mon 11 May 11:20:02 UTC 2026 (1778498402)");
+  assertEquals(result.latest, "Tue 26 May 15:01:25 UTC 2026 (1779807685)");
+  assertEquals(result.upToDate, false);
+  assert(result.bootloaderVersion?.startsWith("default"));
+});
+
+Deno.test("parseEepromUpdate parses an up-to-date BOOTLOADER status as upToDate=true", () => {
+  const output = [
+    "BOOTLOADER: up to date",
+    "   CURRENT: Tue 26 May 15:01:25 UTC 2026 (1779807685)",
+    "    LATEST: Tue 26 May 15:01:25 UTC 2026 (1779807685)",
+    "   RELEASE: default (/usr/lib/firmware/raspberrypi/bootloader-2712/default)",
+  ].join("\n");
+  const result = parseEepromUpdate(output, "");
+  assertEquals(result.upToDate, true);
+});
+
+Deno.test("parseEepromUpdate degrades to all-null fields when CURRENT: is absent (permission denied case)", () => {
+  const warnings: string[] = [];
+  const result = parseEepromUpdate("", "rpi-eeprom-update: Permission denied", {
+    info: () => {},
+    warn: (msg) => warnings.push(msg),
+  });
+  assertEquals(result, {
+    current: null,
+    latest: null,
+    upToDate: null,
+    bootloaderVersion: null,
+  });
+  assertEquals(warnings.length, 1);
+  assert(warnings[0].includes("CURRENT"));
+});
+
+Deno.test("readFirmware writes model + firmwareVersion on this real Pi 5, with NUL stripped from the model string", async () => {
+  const { context, getWrittenResources } = createModelTestContext({
+    globalArgs: { vcgencmdPath: "vcgencmd" },
+    methodName: "readFirmware",
+  });
+
+  await model.methods.readFirmware.execute({}, asContext(context));
+
+  const data = getWrittenResources()[0].data as {
+    model: string;
+    isPi5: boolean;
+    firmwareVersion: string;
+  };
+  assert(data.model.startsWith("Raspberry Pi"));
+  assert(!data.model.includes("\0"), "model string retained a trailing NUL byte");
+  assertEquals(data.isPi5, true);
+  assert(data.firmwareVersion.length > 0);
+});
+
+Deno.test("assertRaspberryPiHardware strips the trailing NUL from /proc/device-tree/model on this real Pi 5", async () => {
+  const hardware = await assertRaspberryPiHardware("vcgencmd");
+  assert(!hardware.model.includes("\0"));
+  assertEquals(hardware.model, hardware.model.trim());
 });
