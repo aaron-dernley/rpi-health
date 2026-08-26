@@ -219,6 +219,68 @@ export function parseThrottled(vcgencmdOutput: string): {
   };
 }
 
+const ClockReadingSchema = z.object({
+  name: z.string().describe("Clock domain name: arm, core, v3d, isp, or hevc."),
+  hertz: z.number().describe("Clock frequency in Hz, from vcgencmd measure_clock."),
+});
+
+const ClocksSchema = z.object({
+  clocks: z.array(ClockReadingSchema).describe(
+    "One entry per measured clock domain (arm, core, v3d, isp, hevc).",
+  ),
+  armHertz: z.number().describe(
+    "ARM clock in Hz, hoisted from the clocks array for readable CEL asserts.",
+  ),
+  coreTempCelsius: z.number().describe(
+    "SoC temperature from vcgencmd measure_temp. Duplicates " +
+      "@aaronge/host-health's sysfs thermal reading via a different path — " +
+      "intentional, for occasional cross-checking, not redundant to remove.",
+  ),
+  coreVolts: z.number().describe("Core voltage in volts, from vcgencmd measure_volts core."),
+  capturedAt: z.string().describe("ISO-8601 timestamp when this snapshot was captured."),
+});
+
+const CLOCK_DOMAINS = ["arm", "core", "v3d", "isp", "hevc"] as const;
+
+/** Parse `vcgencmd measure_clock <name>` output (e.g. "frequency(0)=1500000000"). */
+export function parseClockOutput(output: string): number {
+  const parts = output.trim().split("=");
+  if (parts.length < 2) {
+    throw new Error(`Unexpected vcgencmd measure_clock output: "${output.trim()}"`);
+  }
+  const hertz = Number(parts[1].trim());
+  if (!Number.isFinite(hertz)) {
+    throw new Error(`Could not parse frequency from measure_clock: "${parts[1]}"`);
+  }
+  return hertz;
+}
+
+/** Parse `vcgencmd measure_temp` output (e.g. "temp=58.2'C") into a Celsius number. */
+export function parseTempOutput(output: string): number {
+  const match = /^temp=(-?[\d.]+)'C\s*$/.exec(output.trim());
+  if (!match) {
+    throw new Error(`Unexpected vcgencmd measure_temp output: "${output.trim()}"`);
+  }
+  const celsius = Number(match[1]);
+  if (!Number.isFinite(celsius)) {
+    throw new Error(`Could not parse Celsius value from measure_temp: "${match[1]}"`);
+  }
+  return celsius;
+}
+
+/** Parse `vcgencmd measure_volts <rail>` output (e.g. "volt=0.9053V") into a volts number. */
+export function parseVoltsOutput(output: string): number {
+  const match = /^volt=(-?[\d.]+)V\s*$/.exec(output.trim());
+  if (!match) {
+    throw new Error(`Unexpected vcgencmd measure_volts output: "${output.trim()}"`);
+  }
+  const volts = Number(match[1]);
+  if (!Number.isFinite(volts)) {
+    throw new Error(`Could not parse volts value from measure_volts: "${match[1]}"`);
+  }
+  return volts;
+}
+
 /** Model definition for `@aaronge/rpi-health` — Pi 5 firmware and power telemetry. */
 export const model = {
   type: "@aaronge/rpi-health",
@@ -233,6 +295,14 @@ export const model = {
       schema: ThrottleSchema,
       lifetime: "infinite" as const,
       garbageCollection: 500,
+    },
+    clocks: {
+      description:
+        "Clock frequencies (arm, core, v3d, isp, hevc), core temperature, " +
+        "and core voltage, all from vcgencmd.",
+      schema: ClocksSchema,
+      lifetime: "infinite" as const,
+      garbageCollection: 200,
     },
   },
   methods: {
@@ -291,6 +361,78 @@ export const model = {
           now,
           sinceBoot,
           healthy,
+          capturedAt,
+        });
+        return { dataHandles: [handle] };
+      },
+    },
+    readClocks: {
+      description:
+        "Run vcgencmd measure_clock for each domain plus measure_temp and " +
+        "measure_volts core, and write the clocks resource.",
+      arguments: z.object({}),
+      execute: async (
+        _args: Record<string, never>,
+        context: {
+          globalArgs: GlobalArgs;
+          logger: MinimalLogger;
+          writeResource: (
+            specName: string,
+            name: string,
+            data: Record<string, unknown>,
+          ) => Promise<{ name: string }>;
+        },
+      ) => {
+        await assertRaspberryPiHardware(context.globalArgs.vcgencmdPath);
+        const capturedAt = new Date().toISOString();
+        const vcgencmdPath = context.globalArgs.vcgencmdPath;
+
+        async function runVcgencmd(...args: string[]): Promise<string> {
+          const cmd = new Deno.Command(vcgencmdPath, {
+            args,
+            stdout: "piped",
+            stderr: "piped",
+          });
+          const output = await cmd.output();
+          if (!output.success) {
+            throw new Error(
+              `vcgencmd ${args.join(" ")} failed: ${
+                new TextDecoder().decode(output.stderr).trim()
+              }`,
+            );
+          }
+          return new TextDecoder().decode(output.stdout);
+        }
+
+        context.logger.info("Reading clock domains: {domains}", {
+          domains: CLOCK_DOMAINS.join(", "),
+        });
+        const clocks = await Promise.all(
+          CLOCK_DOMAINS.map(async (name) => ({
+            name,
+            hertz: parseClockOutput(await runVcgencmd("measure_clock", name)),
+          })),
+        );
+        const armClock = clocks.find((c) => c.name === "arm");
+        if (!armClock) {
+          throw new Error("arm clock domain missing from measured clocks");
+        }
+
+        const coreTempCelsius = parseTempOutput(await runVcgencmd("measure_temp"));
+        const coreVolts = parseVoltsOutput(
+          await runVcgencmd("measure_volts", "core"),
+        );
+
+        context.logger.info(
+          "Captured clocks: armHertz={armHertz} coreTempCelsius={coreTempCelsius} coreVolts={coreVolts}",
+          { armHertz: armClock.hertz, coreTempCelsius, coreVolts },
+        );
+
+        const handle = await context.writeResource("clocks", "clocks", {
+          clocks,
+          armHertz: armClock.hertz,
+          coreTempCelsius,
+          coreVolts,
           capturedAt,
         });
         return { dataHandles: [handle] };
