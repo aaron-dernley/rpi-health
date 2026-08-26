@@ -1,0 +1,12 @@
+type: '@aaronge/rpi-health'
+typeVersion: 2026.08.26.1
+id: d049acb9-8841-467b-b082-728b62abb910
+name: rpi-local
+version: 1
+tags: {}
+globalArguments:
+  tempSoftLimitCelsius: 80
+  tempHardLimitCelsius: 85
+  minSupplyVolts: 4.8
+  vcgencmdPath: vcgencmd
+methods: {}
