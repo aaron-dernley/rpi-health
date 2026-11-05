@@ -23,14 +23,14 @@ swamp extension pull @aaronge/rpi-health
 ## Usage
 
 ```sh
-swamp model create @aaronge/rpi-health rpi-local \
+swamp model create @aaronge/rpi-health health-local \
   --global-arg 'tempSoftLimitCelsius=80' \
   --global-arg 'minSupplyVolts=4.8'
 
-swamp model method run rpi-local readThrottle
-swamp model method run rpi-local readClocks
-swamp model method run rpi-local readPmic
-swamp model method run rpi-local readFirmware
+swamp model method run health-local readThrottle
+swamp model method run health-local readClocks
+swamp model method run health-local readPmic
+swamp model method run health-local readFirmware
 ```
 
 Each method writes one resource: `throttle`, `clocks`, `pmic`, `firmware`.
@@ -41,7 +41,7 @@ Reference the latest snapshot from a workflow assert step or another model:
 
 ```yaml
 expr: >-
-  data.latest("rpi-local", "throttle").attributes.healthy == true
+  data.latest("health-local", "throttle").attributes.healthy == true
 ```
 
 ## Global arguments
@@ -99,7 +99,11 @@ belongs to `@aaronge/host-health`.
 
 ## Workflow
 
-The extension ships an `rpi-health` workflow: a `collect` job runs
+The workflow is listed under `workflows:` in `manifest.yaml`, so
+`swamp extension pull @aaronge/rpi-health` installs it alongside the model. It
+expects a model instance named `health-local`.
+
+The extension ships an `@aaronge/rpi-health` workflow: a `collect` job runs
 `readThrottle`, `readClocks`, and `readPmic` in parallel, an `assert` job
 checks throttle health, core temperature, and supply voltage against a
 threshold (`allowFailure: false` — a failed run is the signal, including
