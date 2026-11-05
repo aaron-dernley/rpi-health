@@ -115,4 +115,5 @@ whether the assert job passed. It's scheduled every 5 minutes via
 `readFirmware` is intentionally excluded from this workflow — EEPROM/
 bootloader checks change rarely and belong in a separate, much less
 frequent workflow (not yet built). `readNvmeHealth` (wrapping `smartctl`)
-is planned for once an NVMe SSD is physically installed.
+is planned but not built yet. An NVMe SSD is now installed on the Pi this
+was built for, so nothing blocks it.
